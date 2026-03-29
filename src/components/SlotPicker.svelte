@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Clock, Plus, Trash2, Send, Settings, ChevronDown, ChevronUp, CalendarCheck, UserPlus, X } from 'lucide-svelte';
+  import { Clock, Plus, Trash2, Send, Settings, ChevronDown, ChevronUp, CalendarCheck, UserPlus, X, AlertTriangle } from 'lucide-svelte';
   import { toasts } from '../lib/toast';
   import { loadPreferences, savePreferences, loadRecentGuests, saveRecentGuest, removeRecentGuest, type SavedGuest } from '../lib/storage';
+  import { isGisLoaded, isSignedIn, isTokenExpired, requestAccessToken, revokeToken, restoreToken, fetchCalendarEvents } from '../lib/google';
   import Input from './ui/Input.svelte';
   import Button from './ui/Button.svelte';
   import Card from './ui/Card.svelte';
@@ -42,7 +43,7 @@
   let recentGuests = $state<SavedGuest[]>([]);
   let guestName = $state('');
 
-  // Load saved preferences on mount
+  // Load saved preferences + restore Google token on mount
   onMount(() => {
     const prefs = loadPreferences();
     if (prefs.timezone) localTimezone = prefs.timezone;
@@ -52,7 +53,11 @@
     slotInterval = prefs.slotInterval;
     hostStart = prefs.hostStart;
     hostEnd = prefs.hostEnd;
+    calDetailLevel = prefs.calDetailLevel;
     recentGuests = loadRecentGuests();
+    if (restoreToken()) {
+      calConnected = true;
+    }
   });
 
   // Auto-save preferences when they change
@@ -65,6 +70,7 @@
       slotInterval,
       hostStart,
       hostEnd,
+      calDetailLevel,
     });
   });
 
@@ -95,38 +101,75 @@
     recentGuests = loadRecentGuests();
   }
 
-  // Mock Google Calendar integration
+  // Google Calendar integration
   let calConnected = $state(false);
   let calLoading = $state(false);
+  let calExpired = $state(false);
+  let calDetailLevel = $state<'busy' | 'title' | 'full'>('title');
 
   type CalEvent = { title: string; startHour: number; endHour: number };
+  let calendarEvents = $state<CalEvent[]>([]);
+  let calFetching = $state(false);
 
-  // Generate mock events based on selected date for demo purposes
-  const mockCalEvents = $derived.by((): CalEvent[] => {
-    if (!calConnected || !selectedDate) return [];
-    // Use date string hash to generate consistent but varied events per day
-    const seed = selectedDate.split('-').reduce((a, b) => a + Number(b), 0);
-    const events: CalEvent[] = [];
-    if (seed % 3 !== 0) events.push({ title: 'Team Standup', startHour: 9, endHour: 9.5 });
-    if (seed % 2 === 0) events.push({ title: 'Product Review', startHour: 11, endHour: 12 });
-    if (seed % 4 !== 2) events.push({ title: 'Lunch', startHour: 12.5, endHour: 13.5 });
-    if (seed % 3 === 1) events.push({ title: '1:1 with Manager', startHour: 14, endHour: 14.5 });
-    if (seed % 5 === 0) events.push({ title: 'Sprint Planning', startHour: 15, endHour: 16 });
-    return events;
+  // Note: Google token restored in the preferences onMount below
+
+  // Fetch real calendar events when date or connection changes
+  $effect(() => {
+    if (calConnected && selectedDate && !isTokenExpired()) {
+      calFetching = true;
+      calExpired = false;
+      fetchCalendarEvents(selectedDate, localTimezone)
+        .then(events => {
+          calendarEvents = events;
+          calFetching = false;
+        })
+        .catch(err => {
+          calFetching = false;
+          if (err.message === 'TOKEN_EXPIRED') {
+            calExpired = true;
+            calConnected = false;
+            calendarEvents = [];
+            toasts.error('Google sessie verlopen. Verbind opnieuw.');
+          } else {
+            toasts.error('Kon agenda niet laden.');
+          }
+        });
+    } else if (!calConnected) {
+      calendarEvents = [];
+    }
   });
 
+  // Apply detail level filter for display
+  const displayEvents = $derived<CalEvent[]>(
+    calendarEvents.map(ev => ({
+      ...ev,
+      title: calDetailLevel === 'busy' ? 'Busy' : ev.title,
+    }))
+  );
+
   async function connectCalendar() {
+    if (!isGisLoaded()) {
+      toasts.error('Google login wordt geladen, probeer het opnieuw.');
+      return;
+    }
     calLoading = true;
-    // Simulate OAuth flow delay
-    await new Promise(r => setTimeout(r, 1200));
-    calConnected = true;
+    try {
+      await requestAccessToken();
+      calConnected = true;
+      calExpired = false;
+      toasts.success('Google Calendar verbonden');
+    } catch {
+      toasts.error('Kon niet verbinden met Google.');
+    }
     calLoading = false;
-    toasts.success('Google Calendar connected (demo)');
   }
 
   function disconnectCalendar() {
+    revokeToken();
     calConnected = false;
-    toasts.info('Calendar disconnected');
+    calExpired = false;
+    calendarEvents = [];
+    toasts.info('Calendar losgekoppeld');
   }
 
   const tzOptions = buildTimezoneOptions();
@@ -236,20 +279,28 @@
   <!-- Office hours settings (collapsible) -->
   {#if showSettings}
     <div class="mb-4 p-3 bg-slate-50 rounded-xl border border-slate-100 space-y-3">
-      <!-- Google Calendar mock -->
+      <!-- Google Calendar -->
       <div>
         <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Calendar</p>
         {#if calConnected}
-          <div class="flex items-center justify-between">
+          <div class="flex items-center justify-between mb-2">
             <span class="text-xs text-emerald-600 font-medium flex items-center gap-1.5">
               <CalendarCheck size={13} />
-              Google Calendar connected (demo)
+              Google Calendar verbonden
+              {#if calFetching}<span class="animate-spin text-[10px]">⏳</span>{/if}
             </span>
             <button
               type="button"
               onclick={disconnectCalendar}
               class="text-[11px] text-slate-400 hover:text-red-500 transition-colors"
             >Disconnect</button>
+          </div>
+          <div class="flex items-center gap-1">
+            <span class="text-[10px] text-slate-400 mr-1">Detail:</span>
+            {#each [['busy', 'Bezet/Vrij'], ['title', 'Titel'], ['full', 'Alles']] as [val, label]}
+              <button type="button" onclick={() => calDetailLevel = val as 'busy' | 'title' | 'full'}
+                class="px-2 py-0.5 text-[10px] rounded border transition-all {calDetailLevel === val ? 'bg-indigo-600 text-white border-indigo-600' : 'border-slate-200 text-slate-500 hover:border-indigo-300'}">{label}</button>
+            {/each}
           </div>
         {:else}
           <button
@@ -259,7 +310,7 @@
             class="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 transition-all disabled:opacity-50"
           >
             {#if calLoading}
-              <span class="animate-spin text-sm">⏳</span> Connecting…
+              <span class="animate-spin text-sm">⏳</span> Verbinden…
             {:else}
               <CalendarCheck size={13} />
               Connect Google Calendar
@@ -356,6 +407,19 @@
           </div>
         </div>
       </div>
+    </div>
+  {/if}
+
+  <!-- Token expiry banner -->
+  {#if calExpired}
+    <div class="mb-3 flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg">
+      <AlertTriangle size={14} class="text-amber-600 shrink-0" />
+      <span class="text-xs text-amber-700 flex-1">Google sessie verlopen</span>
+      <button
+        type="button"
+        onclick={connectCalendar}
+        class="text-xs font-medium text-amber-700 hover:text-amber-900 underline"
+      >Opnieuw verbinden</button>
     </div>
   {/if}
 
@@ -502,7 +566,7 @@
         {hostEnd}
         {guestStart}
         {guestEnd}
-        calendarEvents={mockCalEvents}
+        calendarEvents={displayEvents}
         {timeFormat}
         {slotInterval}
         {meetingDuration}

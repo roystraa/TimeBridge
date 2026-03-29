@@ -1,5 +1,6 @@
 const PREFS_KEY = 'tb_preferences';
 const GUESTS_KEY = 'tb_recent_guests';
+const TOKEN_KEY = 'tb_google_token';
 const MAX_GUESTS = 10;
 
 export type Preferences = {
@@ -10,6 +11,7 @@ export type Preferences = {
   slotInterval: 60 | 30 | 15;
   hostStart: number;
   hostEnd: number;
+  calDetailLevel: 'busy' | 'title' | 'full';
 };
 
 export type SavedGuest = {
@@ -30,6 +32,7 @@ const defaultPrefs: Preferences = {
   slotInterval: 60,
   hostStart: 9,
   hostEnd: 17,
+  calDetailLevel: 'title',
 };
 
 export function loadPreferences(): Preferences {
@@ -88,6 +91,38 @@ export function removeRecentGuest(id: string): void {
   try {
     const guests = loadRecentGuests().filter((g: SavedGuest) => g.id !== id);
     localStorage.setItem(GUESTS_KEY, JSON.stringify(guests));
+  } catch {
+    // localStorage unavailable
+  }
+}
+
+// --- Google Token Persistence ---
+
+export function saveGoogleToken(token: string, expiry: number): void {
+  try {
+    localStorage.setItem(TOKEN_KEY, JSON.stringify({ token, expiry }));
+  } catch {
+    // localStorage unavailable
+  }
+}
+
+export function loadGoogleToken(): { token: string; expiry: number } | null {
+  try {
+    const raw = localStorage.getItem(TOKEN_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.token === 'string' && typeof parsed.expiry === 'number') {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearGoogleToken(): void {
+  try {
+    localStorage.removeItem(TOKEN_KEY);
   } catch {
     // localStorage unavailable
   }
